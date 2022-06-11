@@ -1,0 +1,1570 @@
+---
+title: "Data Scientist's Turnover Prediction"
+author: "Goh Jie Xin"
+date: "10/29/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=6, fig.height=4) 
+```
+
+# Libraries
+```{r echo=FALSE}
+library(dplyr)
+library(DataExplorer)
+library(mice)
+library(VIM)
+library(missForest)
+library(caret)
+library(devtools)
+# install_github("cran/DMwR")
+library(DMwR)
+library(caTools)
+library(e1071)
+library(randomForest)
+library(ROCR)
+```
+
+
+# Import Data
+```{r}
+# Convert "NA" or Blanks to NA
+# Convert String Type to Factor
+df <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Lab/aug_train.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+
+head(df,5)
+
+# If the df has blanks, fill in with NA
+df <- mutate_all(df, na_if, "")
+```
+
+
+
+
+# Exploratory Data Analysis (EDA)
+
+## Data Structure
+```{r}
+plot_str(df, type = c("diagonal"), fontSize=35)
+plot_intro(df)
+```
+There are 19158 observations and 14 variables in the dataset.
+Column target is a binary dependent variable.
+There are 13 independent variables, some are categorical and some are numerical variables.
+There is no column with all missing values, but there are 7.70% of missing observations.
+
+
+
+## Distribution of Categorical Variables
+```{r}
+facCol <- names(df)[sapply(df, is.factor)]
+for (col in facCol){
+  print(ggplot(data=df) + geom_bar(mapping = aes(x = get(col))) +
+        labs(x = col, y = "Frequency", 
+                 title = sprintf("Frequency of column %s", col)))
+}
+```
+There are 10 categorical variables in the dataset.
+Column city has more than 100 categories.
+Column gender, enrolled_university, education_level, major_discipline, experience, company_size, company_type and last_new_job have null values.
+The distributions for all the categorical variables are imbalanced. For example, high percentage of the data having category 'Male' in column gender.
+There are two types of categorical data which are nominal data and ordinal data. Nominal data refers to data that does not have specific order whereas ordinal data refers to data that can be ranked or ordered.
+From this dataset, we can conclude that:
+Nominal Variables: city, gender, relevent_experience, enrolled_university, major_discipline, company_type
+Ordinal Variables: education_level, experience, company_size, last_new_job
+Since column relevent_experience has two categories only which are 'Has relevent experience' and 'No relevent experience', it can be known as a binary categorical variable.
+
+
+
+## Distribution of Continuous Variables
+```{r}
+contCol <- names(df)[sapply(df, is.numeric)]
+for (col in contCol){
+  hist(df[[col]], # histogram
+   col="peachpuff", # column color
+   border="black",
+   prob = TRUE, # show densities instead of frequencies
+   xlab = col,
+   main = sprintf("Distribution of column %s", col))
+  lines(density(df[[col]]), # density plot
+   lwd = 2, # thickness of line
+   col = "chocolate3")
+}
+```
+There are 4 continous variables in the dataset.
+Column enrollee_id is a unique column with high cardinality, hence, it should be removed during model training.
+The distribution of column city_development_index in the dataset is ranging from 0.4 to 1.0. There is no candidate living in an underdeveloped city (city_development_index less than 0.4).
+Column city_development_index shows a bimodal distribution, the first peak ranges between 0.6 and 0.65, while the second peak ranges between 0.9 and 1.0.
+The distribution of column training_hours is not normal, it shows a right-skewed distribution. Most of the candidates have lower training hours.
+The distribution of the dependent variable, column target is biased towards '0', indicating that there are more candidates willing to work in the company. The dataset is imbalanced.
+No outlier.
+
+
+
+## Missing Values
+```{r}
+plot_missing(df, missing_only = TRUE)
+# colSums(is.na(df))
+# sum(is.na(df))
+# which (is.na(df$experience)) # Which are the rows with missing values in a column
+```
+There are total of 8 columns having missing observations.
+Among the 8 columns, column company_type has the highest percentage of missing values followed by column company_size, gender and major_discipline.
+Column education_level, last_new_job, enrolled_university and experience have low percentage of missing observations which are less than 2.50%.
+
+
+
+## Distribution of Both Categorical and Continuous Variables
+```{r}
+summary(df)
+```
+
+
+
+## Correlation between Continuous Variables
+```{r}
+# Convert column format to factor
+df$target <- as.factor(df$target)
+plot_correlation(df,'continuous', cor_args = list("use" = "pairwise.complete.obs"))
+```
+There is no correlation between city_development_index and training_hours.
+
+
+
+## Boxplot of city_development_index vs Other Categorical Variables
+```{r}
+facCol <- names(df)[sapply(df, is.factor)]
+for (col in facCol){
+   boxplot(city_development_index ~ get(col), data = df, xlab = col)
+   title(sprintf("%s vs city_development_index", col))
+}
+```
+The distributions of column city_development_index are varies in most of the categories in each categorical variable.
+The median of column city_development_index for both class '0' and '1' in column target are different. The candidates who are willing to work in the company (class '0') have higher median in column city_development_index than those who are searching for new employment (class '1'). However, there are many outliers observed for class '0'.
+
+
+
+## Boxplot of training_hours vs Other Categorical Variables
+```{r}
+facCol <- names(df)[sapply(df, is.factor)]
+for (col in facCol){
+   boxplot(training_hours ~ get(col), data = df, xlab = col)
+   title(sprintf("%s vs training_hours", col))
+}
+```
+The dirtributions of column training_hours are almost similar for every category in each categorical variable.
+The distribution of column training_hours for both '0' and '1' in column target also similar. Apparently, it does not have significant affect on the dependent variable.
+
+
+
+## Relation between column city_development_index and city
+```{r}
+# Aggregate function (Group by and Count Unique)
+plot(aggregate(df$city_development_index~df$city,df, function(x) length(unique(x))))
+
+boxplot(city_development_index ~ city, data = df, xlab = "city")
+title("City vs city_development_index")
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+print(getmode(df$city_development_index))
+```
+
+Column city is related with column city_development_index.
+The same city will have the same city_development_index.
+The graph shows that most of the city have city_developmet_index of 0.7.
+
+
+In summary,
+1. There are many missing values in the dataset.
+2. The dataset is imbalanced.
+3. Column city_development_index and training_hours are not in normal distribution.
+4. SOme of the variables are not significant to the dependent variable.
+
+
+
+
+
+
+# Data Pre-Processing
+
+## Remove Unrelated Column
+1. Column enrollee_id does not give any useful information, so we can delete the column.
+2. Column city and city_development_index is correlated. Same city will have same city_development_index, so we can remove column city (as it has high cardinaility - too many categories).
+```{r}
+# Remove columns
+df$enrollee_id <- NULL
+df$city <- NULL
+```
+
+
+
+
+## Convert Column Format
+
+1. Column target is in num type. We need to convert to factor type.
+```{r}
+# Convert column format to factor
+df$target <- as.factor(df$target)
+```
+
+2. Column experience is factor type. We can convert to num type but before convert need to replace:
+   "<1" --> "0" --> 0
+   ">20" --> "21"  --> 21
+```{r}
+print("Before conversion: ")
+levels(df$experience)
+levels(df$experience) <- c(levels(df$experience),"0","21")
+df$experience[df$experience=="<1"]  <- "0" 
+df$experience[df$experience==">20"]  <- "21"
+# Convert from factor to numeric
+df$experience <- as.numeric(as.character(df$experience))
+print("After conversion: ")
+hist(df$experience)
+```
+Column experience is not showing a normal distribution.
+
+3.Column last_new_job is factor type. We can convert to num type but before convert need to replace:
+   ">4" --> "5"
+   "never" --> "0"
+```{r}
+print("Before conversion: ")
+levels(df$last_new_job)
+levels(df$last_new_job) <- c(levels(df$last_new_job),"5","0")
+df$last_new_job[df$last_new_job==">4"]  <- "5" 
+df$last_new_job[df$last_new_job=="never"]  <- "0"
+# COnvert from factor to numeric
+df$last_new_job <- as.numeric(as.character(df$last_new_job))
+print("After conversion: ")
+hist(df$last_new_job)
+```
+Column last_new_job is not showing a normal distirbution.
+
+```{r}
+# write.csv(df, file = "aug_train2.csv", row.names = FALSE)
+df <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train2.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+```
+aug_train2.csv 
+-Remove column enrollee_id & city
+-Column type conversion (experience & last_new_job)
+
+
+
+
+## Handling Missing Values
+
+Distributions of Missing Values
+```{r}
+# View missing values
+colSums(is.na(df))
+plot_missing(df)
+```
+
+1. Imputation by Mean & Mode
+   -Continuous column - fill NA by mean.
+    na.rm = True : ignore NA when computing mean
+   -Factor column - fill NA by mode
+```{r}
+# Method 1 - Imputation
+
+# Impute continuous var (mean)
+dfImputation <- df
+contCol <- names(dfImputation)[sapply(dfImputation, is.numeric)]
+for (col in contCol){
+   sumNA <- sum(is.na(df[[col]]))
+   dfImputation[ ,col][is.na(dfImputation[ ,col])] <- mean(dfImputation[ ,col], na.rm=TRUE)
+   # Plot Density Plot Before & After Imputation
+   plot(density(na.omit(df[[col]])),
+        main=sprintf("Density plot of %s (Initial NA count: %d)", col,  sumNA))
+   lines(density(dfImputation[[col]]),col="red")
+   legend("topright", cex=0.8, horiz=TRUE,
+          c("Before Imputation", "After Imputation"),
+          lty = 1, lwd = 2, col = c("black", "red"))
+
+}
+
+# Impute factor var 
+facCol <- names(dfImputation)[sapply(dfImputation, is.factor)]
+for (col in facCol){
+   sumNA <- sum(is.na(df[[col]]))
+   mode <- function(x){levels(x)[which.max(tabulate(x))]}  # Function to obtain mode
+   dfImputation[ ,col][is.na(dfImputation[ ,col])] <-  mode(df[[col]])
+   # Prepare data to plot graph
+   colType <- c(rep("Before Imputation", dim(df)[1]), 
+                rep("After Imputation", dim(dfImputation)[1]))
+   colVal <- c(as.character(df[,col]), as.character(dfImputation[,col]))
+   outcome_data <- as.data.frame(unclass(cbind(colType, colVal)),
+                                 stringsAsFactors = TRUE)
+   outcome_data <- data.frame(Type = factor(colType, 
+                                            levels = c("Before Imputation", "After Imputation")),
+                                            Category = colVal)
+   # Plot side by side bar chart
+   print(ggplot(data = data.frame(table(outcome_data)), aes(x = Category, y = Freq, fill = Type)) +
+          geom_bar(stat = "identity", position = position_dodge(), alpha = 0.75)  +
+          geom_text(aes(label = Freq), fontface = "bold", vjust = 1.5,
+            position = position_dodge(.9), size = 4) +
+          labs(x = col, y = "Frequency", 
+               title = sprintf(" %s (Initial NA count: %d)", col,  sumNA)) +
+         theme(plot.title = element_text(hjust = 0.5),
+               axis.title.x = element_text(face="bold", colour="black", size = 12),
+               axis.title.y = element_text(face="bold", colour="black", size = 12),
+               legend.title = element_text(face="bold", size = 10)))
+
+}
+```
+
+```{r}
+# write.csv(dfImputation, file = "aug_train_meanMode.csv", row.names = FALSE)
+dfImputation <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_meanMode.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+```
+
+2. MICE
+   Setting: 10 iterations, cart (imputation by classification & regression trees)
+   As MICE method takes time to run, the output is exported. (aug_train_mice.csv)
+```{r}
+# Method 2 - MICE
+# mice return list, use complete() to convert to df
+# df_mice <- mice(df, 10, method="cart")
+# df_mice <- complete(df_mice)
+# plot_missing(df_mice)
+```   
+
+```{r}
+# write.csv(df_mice, file = "aug_train_mice.csv", row.names = FALSE)
+df_mice <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mice.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+```
+
+3. missForest
+   Setting: 10 iterations
+   As missForest method takes time to run, the output is exported (aug_train_mF.csv)
+```{r}
+# Method 3 - missForest
+# df_mF <- missForest(df, maxiter = 10)
+# df_mF <- (df_mF$ximp)
+# plot_missing(df_mF)
+```
+
+```{r}
+# write.csv(df_mF, file = "aug_train_mF.csv", row.names = FALSE)
+df_mF <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+```
+
+Comparison of 3 types of Imputation
+```{r}
+# Plot graph
+
+# Continuous Column
+contCol <- names(dfImputation)[sapply(dfImputation, is.numeric)]
+for (col in contCol){
+   sumNA <- sum(is.na(df[[col]]))
+   # Plot Density Plot Before & After Imputation
+   plot(density(na.omit(df[[col]])),
+        main=sprintf("Density plot of %s (Initial NA count: %d)", col,  sumNA))
+   lines(density(dfImputation[[col]]),col="red")
+   lines(density(df_mice[[col]]),col="blue")
+   lines(density(df_mF[[col]]),col="brown")
+   legend("topright", cex=0.7, horiz=TRUE,
+          c("Original", "Impute by Mean", "MICE", "missForest"),
+          lty = 1, lwd = 2, col = c("black", "red", "blue", "green"))
+}
+
+# Categorical variable
+# Impute factor var 
+facCol <- names(dfImputation)[sapply(dfImputation, is.factor)]
+for (col in facCol){
+   sumNA <- sum(is.na(df[[col]]))
+   # Prepare data to plot graph
+   colType <- c(rep("Original", dim(df)[1]), 
+                rep("Impute by Mode", dim(dfImputation)[1]),
+                rep("MICE", dim(df_mice)[1]),
+                rep("missForest", dim(df_mF)[1]))
+   colVal <- c(as.character(df[,col]), as.character(dfImputation[,col]),
+               as.character(df_mice[,col]), as.character(df_mF[,col]))
+   outcome_data <- as.data.frame(unclass(cbind(colType, colVal)),
+                                 stringsAsFactors = TRUE)
+   outcome_data <- data.frame(Type = factor(colType, 
+                                            levels = c("Original", "Impute by Mode", 
+                                                       "MICE", "missForest")),
+                                            Category = colVal)
+   # Plot side by side bar chart
+   print(ggplot(data = data.frame(table(outcome_data)), aes(x = Category, y = Freq, fill = Type)) +
+          geom_bar(stat = "identity", position = position_dodge(), alpha = 0.75)  +
+          geom_text(aes(label = Freq), vjust = 1.5,
+            position = position_dodge(.9), size = 2) +
+          labs(x = col, y = "Frequency", 
+               title = sprintf(" %s (Initial NA count: %d)", col,  sumNA)) +
+         theme(plot.title = element_text(hjust = 0.5),
+               axis.title.x = element_text(face="bold", colour="black", size = 12),
+               axis.title.y = element_text(face="bold", colour="black", size = 12),
+               legend.title = element_text(face="bold", size = 10)))
+}
+```
+The data distribution almost the same.
+Except for column company_size, dataset impute by mode is biased towards category '50-99' while the other two methods showaing an equal distribution among the catagories.
+
+
+
+
+## Data Encoding
+Reference: https://www.r-bloggers.com/2020/02/a-guide-to-encoding-categorical-features-using-r/
+Encoding for categorical features:
+Nominal - One Hot Encoding
+Ordinal - defined order
+
+```{r}
+df <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train2.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+dfImputation <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_meanMode.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mice <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mice.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mF <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+
+datasets = list(df, dfImputation, df_mice, df_mF)
+```
+
+1. Encoding - Ordinal Variables
+   Ordinal variables: education_level, company_size
+```{r}
+ordinalCol = c("education_level", "company_size")
+
+# Encoding for Ordinal Variable, Follow defined order
+encode_ordinal <- function(x, order = unique(x)) {
+  x <- as.numeric(factor(x, levels = order, exclude = NULL))
+  x
+}
+
+# df_impute_mice_encoded <- df_impute_mice
+i = 1
+for (data in datasets){
+   # Column education_level
+   levels(data[["education_level"]])
+   table(data[["education_level"]],
+         encode_ordinal(data[["education_level"]],
+         order = c("Primary School", "High School", "Graduate", "Masters", "Phd")),
+         useNA = "ifany")
+   
+   # Column company_size
+   levels(data[["company_size"]])
+   table(data[["company_size"]],
+         encode_ordinal(data[["company_size"]],
+         order = c("<10", "10/49", "50-99", "100-500", "500-999", 
+                   "1000-4999", "5000-9999", "10000+")),
+         useNA = "ifany")
+   
+   # Encode the df
+   data[["education_level"]] <- encode_ordinal(data[["education_level"]],
+                                order = c("Primary School", "High School", "Graduate", "Masters", "Phd"))
+   data[["company_size"]] <- encode_ordinal(data[["company_size"]],
+                             order = c("<10", "10/49", "50-99", "100-500", "500-999", 
+                             "1000-4999", "5000-9999", "10000+"))
+   
+   for (col in ordinalCol){
+      hist((data[[col]]), main=sprintf("Distritbution of %s", col), xlab=col)
+   }
+   
+   datasets[[i]] <- data
+   i=i+1
+}
+```
+
+2. Encoding - Nominal Variables
+   Nominal variables: gender, enrolled_university, major_discipline, company_type
+   Use dummyVars from caret Package
+```{r}
+nominalCol = c("gender", "enrolled_university", "major_discipline", "company_type")
+
+i = 1
+for (data in datasets){
+   dummy <- caret::dummyVars(" ~ gender + enrolled_university + major_discipline + company_type", 
+                             data = data)
+   dummy <- data.frame(predict(dummy, newdata = data))
+   data <- cbind(subset(data, select=-c(gender, enrolled_university, major_discipline, company_type)), dummy)
+   
+   datasets[[i]] <- data
+   i=i+1
+}
+```
+
+3. Encoding - Binary
+   Binary category variable: relevent_experience
+   "Has relevent experience" --> 1
+   "No relevent experience" --> 0
+```{r}
+i = 1
+for (data in datasets){
+   levels(data$relevent_experience) <- c(levels(data$relevent_experience),"1","0")
+   data$relevent_experience[data$relevent_experience=="Has relevent experience"]  <- "1" 
+   data$relevent_experience[data$relevent_experience=="No relevent experience"]  <- "0"
+   # Convert from factor to numeric
+   data$relevent_experience <- as.numeric(as.character(data$relevent_experience))
+   hist(data$relevent_experience)
+   
+   datasets[[i]] <- data
+   i=i+1
+}
+```
+
+```{r}
+# Extract from the list and save in each variable
+df <- datasets[[1]]
+dfImputation <- datasets[[2]]
+df_mice <- datasets[[3]]
+df_mF <- datasets[[4]]
+
+write.csv(df, file = "aug_train2.csv", row.names = FALSE)
+write.csv(dfImputation, file = "aug_train_meanMode.csv", row.names = FALSE)
+write.csv(df_mice, file = "aug_train_mice.csv", row.names = FALSE)
+write.csv(df_mF, file = "aug_train_mF.csv", row.names = FALSE)
+```
+
+
+
+
+## Splitting into Training and Testing Data
+Stratified sampling method: Stratified sampling aims at splitting a data set so that each split is similar with respect to something. In a classification setting, it is often chosen to ensure that the train and test sets have approximately the same percentage of samples of each target class as the complete set.
+80% training data & 20% testing data
+
+```{r}
+#df <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train2.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+#dfImputation <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_meanMode.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+#df_mice <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mice.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+#df_mF <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+
+#datasets = list(df, dfImputation, df_mice, df_mF)
+datasets = list(df_mF)
+```
+
+```{r}
+# Split the data & save into 2 lists - trainSets and testSets
+set.seed(0)
+
+#trainSets = list(df, dfImputation, df_mice, df_mF)
+#testSets = list(df, dfImputation, df_mice, df_mF)
+
+trainSets = list(df_mF)
+testSets = list(df_mF)
+
+i = 1
+for (data in datasets){
+   
+   split = sample.split(data$target, SplitRatio = 0.8)   
+   train_set = subset(data, split == TRUE)
+   test_set = subset(data, split == FALSE)
+   
+   # Checking Class distribution
+   table(data$target)
+   prop.table(table(data$target))
+   prop.table(table(train_set$target))
+   prop.table(table(test_set$target))
+   
+   trainSets[[i]] = train_set
+   testSets[[i]] = test_set
+   
+   i = i+1
+}
+```
+
+```{r}
+# Check the distribution of trainSets
+for (data in trainSets){
+   p<-ggplot(data=data.frame(table(as.factor(data$target))), aes(x=Var1, y=Freq)) +
+      geom_bar(stat="identity", fill="steelblue")+
+      geom_text(aes(label=sprintf("%s\n%s%%", Freq, round(Freq/sum(Freq)*100,2))), 
+                vjust=1.6, color="white", size=3.5)+
+      labs(x = "Target", y = "Frequency", 
+           title = "Target Frequency of Train Set") +
+      theme_minimal()
+   print(p)
+}
+```
+
+```{r}
+# Check the distribution of testSets
+for (data in testSets){
+   p<-ggplot(data=data.frame(table(as.factor(data$target))), aes(x=Var1, y=Freq)) +
+      geom_bar(stat="identity", fill="steelblue")+
+      geom_text(aes(label=sprintf("%s\n%s%%", Freq, round(Freq/sum(Freq)*100,2))), 
+                vjust=1.6, color="white", size=3.5)+
+      labs(x = "Target", y = "Frequency", 
+           title = "Target Frequency of Test Set") +
+      theme_minimal()
+   print(p)
+}
+```
+
+
+
+
+## Oversampling with SMOTE
+Class '0' has almost 75% and Class '1' has almost 25%.
+This shows an imbalanced dataset.
+
+```{r}
+# Apply SMOTE on train set only
+trainBalancedSets = trainSets
+
+i = 1
+for (data in trainSets){
+   # Convert column format to factor
+   data$target <- as.factor(data$target)
+   
+   print(table(data$target))
+   balancedData = SMOTE(target~., data, perc.over = 200, k = 5, perc.under = 200)
+   print(table(balancedData$target))
+   
+   trainBalancedSets[[i]] = balancedData
+   i=i+1
+}
+```
+
+```{r}
+# Prepare data to plot graph
+original = data.frame(table(trainSets[[1]]$target))
+original[["Type"]] = "Original"
+original[["Percentage"]] = round(original$Freq/sum(original$Freq)*100,2)
+
+oversampling = data.frame(table(trainBalancedSets[[1]]$target))
+oversampling[["Type"]] = "Oversampling"
+oversampling[["Percentage"]] = round(oversampling$Freq/sum(oversampling$Freq)*100,2)
+
+# Plot side by side bar chart
+print(ggplot(data = rbind(original, oversampling), aes(x = Var1, y = Freq, fill = Type)) +
+       geom_bar(stat = "identity", position = position_dodge(), alpha = 0.75)  +
+       geom_text(aes(label = sprintf("%s\n%s%%", Freq, Percentage)), vjust = 1.5,
+         position = position_dodge(.9), size = 3) +
+       labs(x = "Target", y = "Frequency", 
+            title = "Target Frequency" )+
+      theme(plot.title = element_text(hjust = 0.5),
+            axis.title.x = element_text(face="bold", colour="black", size = 12),
+            axis.title.y = element_text(face="bold", colour="black", size = 12),
+            legend.title = element_text(face="bold", size = 10)))
+
+```
+
+Export to csv
+```{r}
+# Original Train
+write.csv(trainSets[[1]], file = "aug_train2_train.csv", row.names = FALSE)
+write.csv(trainSets[[2]], file = "aug_train_meanMode_train.csv", row.names = FALSE)
+write.csv(trainSets[[3]], file = "aug_train_mice_train.csv", row.names = FALSE)
+write.csv(trainSets[[4]], file = "aug_train_mF_train.csv", row.names = FALSE)
+
+# Upsampling Train
+write.csv(trainBalancedSets[[1]], file = "aug_train2_trainbal.csv", row.names = FALSE)
+write.csv(trainBalancedSets[[2]], file = "aug_train_meanMode_trainbal.csv", row.names = FALSE)
+write.csv(trainBalancedSets[[3]], file = "aug_train_mice_trainbal.csv", row.names = FALSE)
+write.csv(trainBalancedSets[[4]], file = "aug_train_mF_trainbal.csv", row.names = FALSE)
+
+# Test
+write.csv(testSets[[1]], file = "aug_train2_test.csv", row.names = FALSE)
+write.csv(testSets[[2]], file = "aug_train_meanMode_test.csv", row.names = FALSE)
+write.csv(testSets[[3]], file = "aug_train_mice_test.csv", row.names = FALSE)
+write.csv(testSets[[4]], file = "aug_train_mF_test.csv", row.names = FALSE)
+```
+
+**Extra - Without Encoding
+```{r}
+write.csv(trainBalancedSets[[1]], file = "aug_train_mF_trainbal_noencoding.csv", row.names = FALSE)
+write.csv(testSets[[1]], file = "aug_train_mF_test_noencoding.csv", row.names = FALSE)
+```
+
+
+
+
+
+# Model Implementation
+
+Ref: https://rpubs.com/ShiboFeng/541838
+
+Parameter Tuning using Grid Search
+Ref: https://www.rdocumentation.org/packages/e1071/versions/1.7-5/topics/tune
+
+## Read in train & test data
+```{r}
+# Original Train
+df_train <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train2_train.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+dfImputation_train <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_meanMode_train.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mice_train <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mice_train.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mF_train <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF_train.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+
+df_train$target = as.factor(df_train$target)
+dfImputation_train$target = as.factor(dfImputation_train$target)
+df_mice_train$target = as.factor(df_mice_train$target)
+df_mF_train$target = as.factor(df_mF_train$target)
+
+# Upsampling Train
+df_trainbal <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train2_trainbal.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+dfImputation_trainbal <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_meanMode_trainbal.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mice_trainbal <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mice_trainbal.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mF_trainbal <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF_trainbal.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+
+df_trainbal$target = as.factor(df_trainbal$target)
+dfImputation_trainbal$target = as.factor(dfImputation_trainbal$target)
+df_mice_trainbal$target = as.factor(df_mice_trainbal$target)
+df_mF_trainbal$target = as.factor(df_mF_trainbal$target)
+
+# Test
+df_test <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train2_test.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+dfImputation_test <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_meanMode_test.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mice_test <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mice_test.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+df_mF_test <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF_test.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+
+dfImputation_test$target = as.factor(dfImputation_test$target)
+df_mice_test$target = as.factor(df_mice_test$target)
+df_mF_test$target = as.factor(df_mF_test$target)
+```
+
+
+```{r}
+#df_mF_noencoding_trainbal <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF_trainbal_noencoding.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+#df_mF_noencoding_trainbal$target = as.factor(df_mF_noencoding_trainbal$target)
+
+#df_mF_noencoding_test <- read.csv('C:/Users/GL63/OneDrive - Asia Pacific University/6. Applied Machine Learning/Assignment/aug_train_mF_test_noencoding.csv', header = T, na.strings=c("NA","NaN", ""), stringsAsFactors=T)
+#df_mF_noencoding_test$target = as.factor(df_mF_noencoding_test$target)
+```
+
+
+## 1. Support Vector Machine (SVM)
+Ref: https://www.rdocumentation.org/packages/e1071/versions/1.7-9/topics/svm
+     https://rpubs.com/dimensionless/svm
+     https://stats.stackexchange.com/questions/237382/difference-between-the-types-of-svm
+```{r}
+# Build Model with different Kernel - radial, linear, polynomial, sigmoid
+
+# 1. radial
+x = dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]
+y = dfImputation_train[["target"]]
+
+svm_rbf <- svm(x, y, probability=TRUE, kernel="radial")
+summary(svm_rbf)
+
+# performance
+cm(svm_rbf,dfImputation_train,dfImputation_test,"target")
+roc_svm(svm_rbf,dfImputation_test,"target","SVC - Radial")
+```
+
+
+```{r}
+# 2. linear
+x = dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]
+y = dfImputation_train[["target"]]
+
+# svm_linear <- svm(target~.,data = dfImputation_train,probabibility=TRUE,kernel="linear")
+svm_linear <- svm(x, y, kernel="linear", probability = TRUE) 
+summary(svm_linear)
+
+# performance
+cm(svm_linear,dfImputation_train,dfImputation_test,"target")
+roc_svm(svm_linear,dfImputation_test,"target","SVC - Linear")
+```
+
+
+```{r}
+# 3. Sigmoid Kernel
+x = dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]
+y = dfImputation_train[["target"]]
+
+svm_sigmoid <- svm(x, y, kernel="sigmoid", probability = TRUE) 
+summary(svm_sigmoid)
+
+# performance
+cm(svm_sigmoid,dfImputation_train,dfImputation_test,"target")
+roc_svm(svm_sigmoid,dfImputation_test,"target","SVC - Sigmoid")
+```
+
+
+```{r}
+# 4. Polynomial Kernel
+x = dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]
+y = dfImputation_train[["target"]]
+
+svm_poly <- svm(x, y, kernel="poly", probability = TRUE) 
+summary(svm_poly)
+
+# performance
+cm(svm_poly,dfImputation_train,dfImputation_test,"target")
+roc_svm(svm_poly,dfImputation_test,"target","SVC - Polynomial")
+```
+
+Which kernel is the most suitable to the dataset? Radial. 
+
+Both SVC models with linear and sigmoid kernel do not really fit well to the dataset. 
+
+SVC model with linear kernel biased towards class '0', it is predicted at random. 
+
+SVC model with sigmoid kernel have high FP and FN. Based on the ROC curve, the curve lies below the diagonal line when the FPR or (1-Specificity) higher than 0.5. It is worse than predict at random. 
+
+Based on the ROC curve, both SVC model with radial and polynomial kernel have better performance.  
+
+SVC model with polynomial kernel is good at predicting class '0' but bad in predicting class '1'.  
+
+SVC model with radial kernel is slightly poor than polynomial kernel in predicting class '0' but it is better than polynomial kernel in predicting class '1'. 
+
+In overall, SVC with radial kernel has the best performance with AUC 0.7255 and sigmoid kernel has the worst performance with AUC 0.5174. 
+
+The following tuning & cross-validation steps based on SVC model with Radial kernel.
+
+```{r}
+# library(doParallel)
+# cl <- makePSOCKcluster(5)
+# registerDoParallel(cl)
+
+## When you are done:
+# stopCluster(cl)
+```
+
+```{r}
+# 1. radial
+start.time <- proc.time()
+x = dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]
+y = dfImputation_train[["target"]]
+
+svm_rbf2 <- svm(x, y, probability=TRUE, kernel="radial")
+summary(svm_rbf2)
+
+# performance
+cm(svm_rbf2,dfImputation_train,dfImputation_test,"target")
+roc_svm(svm_rbf2,dfImputation_test,"target","SVC - Radial")
+
+stop.time <- proc.time()
+print(stop.time-start.time)
+```
+
+```{r}
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+start.time <- proc.time()
+x = dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]
+y = dfImputation_train[["target"]]
+
+svm_rbf2 <- svm(x, y, probability=TRUE, kernel="radial")
+summary(svm_rbf2)
+
+# performance
+cm(svm_rbf2,dfImputation_train,dfImputation_test,"target")
+roc_svm(svm_rbf2,dfImputation_test,"target","SVC - Radial")
+
+stop.time <- proc.time()
+print(stop.time-start.time)
+
+stopCluster(cl)
+```
+
+
+
+Parallel:
+ user  system elapsed 
+ 236.71    0.71  238.27 
+ 
+ tgt run:
+ user  system elapsed 
+ 136.47    0.33  136.83 
+ 
+Without Parallel: 
+user  system elapsed 
+ 230.64    0.33  232.58 
+ 
+ 
+
+
+```{r}
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+start.time <- proc.time()
+x = dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]
+y = dfImputation_train[["target"]]
+
+set.seed(123)
+svm_rbf2 <- train(target~., data=dfImputation_train, method = "svmRadial")
+summary(svm_rbf2)
+
+# performance
+cm(svm_rbf2,dfImputation_train,dfImputation_test,"target")
+roc_svm(svm_rbf2,dfImputation_test,"target","SVC - Radial")
+
+stop.time <- proc.time()
+print(stop.time-start.time)
+```
+
+
+
+
+
+
+
+Model Tuning
+```{r}
+set.seed(123)
+svm_rbf_tuned = tune(svm, target~., data=dfImputation_train,
+                     ranges = list(epsilon = seq (0, 1, 0.1), cost = 2^(0:2)))
+plot (tuned_model)
+summary (tuned_model)
+tuned_model$best.parameters
+```
+
+
+
+##2. Random Forest
+```{r}
+# Convert target col to factor type
+df_train$target = as.factor(df_train$target)
+df_test$target = as.factor(df_test$target)
+
+# No cv, no param tuning
+rfModel <- train(target ~ ., data = df_train, method = "rf")
+rfModel
+```
+dfImputation_train: mtry = 2; accuracy: 0.7637487
+
+```{r}
+
+cm(rfModel, dfImputation_train, dfImputation_test, "target")
+# Check the Importance of Attributes
+#varimp_rf <- varImp(model_rf)
+#varimp_rf
+```
+
+
+Version 2
+Ref: https://www.youtube.com/watch?v=dJclNIN-TPo
+```{r}
+#install.packages('randomForest')
+library(randomForest)
+
+set.seed(111)
+
+rfA1 <- randomForest(target~., data=dfImputation_train)
+print("RF A1: ")
+print(rfA1)
+
+rfA2 <- randomForest(target~., data=dfImputation_trainbal)
+print("RF A2: ")
+print(rfA2)
+
+rfB1 <- randomForest(target~., data=df_mice_train)
+print("RF B1: ")
+print(rfB1)
+
+rfB2 <- randomForest(target~., data=df_mice_trainbal)
+print("RF B2: ")
+print(rfB2)
+
+rfC1 <- randomForest(target~., data=df_mF_train)
+print("RF C1: ")
+print(rfC1)
+
+rfC2 <- randomForest(target~., data=df_mF_trainbal)
+print("RF C2: ")
+print(rfC2)
+
+```
+The out-of-bag (OOB) error is the average error for each calculated using predictions from the trees that do not contain in their respective bootstrap sample.
+
+dfImputation: With ntree=500 and ntry=5, the OOB estimate of error rate is 22.3% which is high.
+
+
+```{r}
+#library(ggplot2)
+# Prediction & Confusion Matrix  --> in Model Validation
+#cm(rf, dfImputation_train, dfImputation_test, "target")
+
+# Error rate of the model
+plot(rfA1, main='RF Model A1')
+abline(v=180, col="red")
+
+plot(rfA2, main='RF Model A2')
+abline(v=180, col="red")
+
+plot(rfB1, main='RF Model B1')
+abline(v=180, col="red")
+
+plot(rfB2, main='RF Model B2')
+abline(v=160, col="red")
+
+plot(rfC1, main='RF Model C1')
+abline(v=140, col="red")
+
+plot(rfC2, main='RF Model C2')
+abline(v=300, col="red")
+```
+Error rate of the model: As number of tree grow, the OOB error rate decreases then remain constant, not able to improve the error after about 110 trees
+
+Optimal ntree
+A1: 180
+A2: 180
+B1: 180
+B2: 160
+C1: 140
+C2: 300
+
+```{r}
+# Tune mtry
+tA1 <- tuneRF(dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))],
+              dfImputation_train[["target"]],
+              stepFactor = 0.8, plot = TRUE, ntreeTry = 180, trace = TRUE, improve = 0.01)
+
+tA2 <- tuneRF(dfImputation_trainbal[ ,-which(names(dfImputation_trainbal) %in% c("target"))],
+              dfImputation_trainbal[["target"]],
+              stepFactor = 0.8, plot = TRUE, ntreeTry = 180, trace = TRUE, improve = 0.01)
+
+tB1 <- tuneRF(df_mice_train[ ,-which(names(df_mice_train) %in% c("target"))],
+              df_mice_train[["target"]],
+              stepFactor = 0.8, plot = TRUE, ntreeTry = 180, trace = TRUE, improve = 0.01)
+
+tB2 <- tuneRF(df_mice_trainbal[ ,-which(names(df_mice_trainbal) %in% c("target"))],
+              df_mice_trainbal[["target"]],
+              stepFactor = 0.8, plot = TRUE, ntreeTry = 160, trace = TRUE, improve = 0.01)
+
+tC1 <- tuneRF(df_mF_train[ ,-which(names(df_mF_train) %in% c("target"))],
+              df_mF_train[["target"]],
+              stepFactor = 0.8, plot = TRUE, ntreeTry = 140, trace = TRUE, improve = 0.01)
+
+tC2 <- tuneRF(df_mF_trainbal[ ,-which(names(df_mF_trainbal) %in% c("target"))],
+              df_mF_trainbal[["target"]],
+              stepFactor = 0.8, plot = TRUE, ntreeTry = 300, trace = TRUE, improve = 0.01)
+```
+Optimal ntree and mtry
+A1: 180; 4
+A2: 180; 15
+B1: 180; 7
+B2: 160; 9
+C1: 140; 7
+C2: 300; 15
+
+```{r}
+set.seed(111)
+```
+
+```{r}
+# Update the model
+newrfA1 <- randomForest(target~., data=dfImputation_train,
+                        ntree = 180, mtry = 4, importance=TRUE)
+print("Tuned RF A1: ")
+print(newrfA1)
+```
+
+
+```{r}
+newrfA2 <- randomForest(target~., data=dfImputation_trainbal,
+                        ntree = 180, mtry = 15, importance=TRUE)
+print("Tuned RF A2: ")
+print(newrfA2)
+```
+
+```{r}
+newrfB1 <- randomForest(target~., data=df_mice_train,
+                        ntree = 180, mtry = 7, importance=TRUE)
+print("Tuned RF B1: ")
+print(newrfB1)
+```
+
+```{r}
+newrfB2 <- randomForest(target~., data=df_mice_trainbal,
+                        ntree = 160, mtry = 9, importance=TRUE)
+print("Tuned RF B2: ")
+print(newrfB2)
+```
+
+```{r}
+newrfC1 <- randomForest(target~., data=df_mF_train,
+                        ntree = 140, mtry = 7, importance=TRUE)
+print("Tuned RF C1: ")
+print(newrfC1)
+```
+
+```{r}
+newrfC2 <- randomForest(target~., data=df_mF_trainbal,
+                        ntree = 300, mtry = 15, importance=TRUE)
+print("Tuned RF C2: ")
+print(newrfC2)
+```
+After optimization, the OOB Error of the RF models do decreases except model B1.
+Among all the models, RF C2 has the least OOB Error - 7.29%.
+
+```{r fig.width=10, fig.height=6}
+# Analyse on the model
+
+# No of nodes for the trees
+hist(treesize(newrf),
+     main="No. of Nodes for the Trees", col="green")
+
+# Variable Importance
+varImpPlot(newrf, main = "Variable Importance")
+print(importance(newrf))
+print(varUsed(rf))
+```
+Overall distribution of the number of nodes in 110 trees are 1100 - 2200.
+Majority of the trees have about 1700 - 1800 nodes. (Complex tree)
+
+Importance:
+1st graph - How worse the model performs without each variable
+            city_development_index is the most important Variable in the model
+            Whereas company_type.Public Sector and training_hours are not significant to the model
+2nd graph - How pure the nodes are at the end of the tree without each variable
+            city_development_index has highest contribution towards the Gini parameter
+
+```{r}
+# Partial Dependence Plot
+partialPlot(newrf, dfImputation_train, city_development_index, "1")
+
+# Multi-dimensional Scaling Plot of Proximity Matrix
+MDSplot(newrf, dfImputation_train$traget)
+
+```
+
+
+
+
+
+##3. Extreme Gradient Boosting (XGB)
+Ref: https://www.hackerearth.com/practice/machine-learning/machine-learning-algorithms/beginners-tutorial-on-xgboost-parameter-tuning-r/tutorial/
+https://xgboost.ai/rstats/2016/03/10/xgboost.html
+https://towardsdatascience.com/getting-to-an-hyperparameter-tuned-xgboost-model-in-no-time-a9560f8eb54b
+
+```{r}
+library(mlr)
+library(xgboost)
+```
+
+
+```{r}
+#preparing matrix 
+dtrain <- xgb.DMatrix(data = as.matrix(dfImputation_train[ ,-which(names(dfImputation_train) %in% c("target"))]),
+                      label = as.matrix(dfImputation_train[['target']])) 
+dtest <- xgb.DMatrix(data = as.matrix(dfImputation_test[ ,-which(names(dfImputation_test) %in% c("target"))]),
+                     label=as.matrix(dfImputation_test[['target']]))
+
+#default parameters
+params <- list(booster = "gbtree", objective = "binary:logistic", eta=0.3, gamma=0, max_depth=6, min_child_weight=1, subsample=1, colsample_bytree=1)
+
+# calculate the best nround for this model
+set.seed(123)
+xgbcv <- xgb.cv( params = params, data = dtrain, nrounds = 100, nfold = 5, showsd = T, stratified = T, print_every_n = 10, early_stopping_rounds = 20, maximize = F)
+```
+Best itr = 14
+
+```{r}
+#first default - model training
+xgb1 <- xgb.train (params = params, data = dtrain, nrounds = 79, watchlist = list(val=dtest,train=dtrain), print_every_n = 10, early_stopping_rounds = 10, maximize = F , eval_metric = "error")
+
+xgbpred <- predict (xgb1,dtest)
+xgbpred <- ifelse (xgbpred > 0.5,1,0)
+
+confusionMatrix (as.factor(xgbpred), dfImputation_test[['target']])
+```
+
+```{r}
+rocxgboost <- function(model, test, targetCol, title){
+   dtest <- xgb.DMatrix(data = as.matrix(test[ ,-which(names(test) %in% c("target"))]),
+                              label=as.matrix(test[['target']]))
+   dlabel <- as.matrix(test[['target']])
+
+   Predict_ROC <- predict (model,dtest)
+   # Predict_ROC <- ifelse (Predict_ROC > 0.5,Predict_ROC,1-Predict_ROC)
+
+   pred = prediction(Predict_ROC, test[[targetCol]])
+   perf = ROCR::performance(pred, "tpr", "fpr")
+   #plot(perf, colorize = T)
+   plot(perf,
+        main = sprintf("ROC curve - %s",title),
+        ylab = "Sensitivity",
+        xlab = "1-Specificity")
+   abline(a=0, b= 1, lty=2)
+
+   # Area Under Curve
+   auc = as.numeric(ROCR::performance(pred, "auc")@y.values)
+   auc = round(auc, 4)
+   print(paste("AUC: ", auc))
+
+
+}
+
+rocxgboost(xgb1, dfImputation_test, "target", "XGBoost")
+```
+
+```{r} 
+library(data.table)
+#convert characters to factors
+train = setDT(dfImputation_train)
+test = setDT(dfImputation_test)
+
+fact_col <- colnames(train)[sapply(train,is.character)]
+
+for(i in fact_col) set(train,j=i,value = factor(train[[i]]))
+for (i in fact_col) set(test,j=i,value = factor(test[[i]]))
+
+#create tasks
+traintask <- makeClassifTask (data = train,target = "target")
+testtask <- makeClassifTask (data = test,target = "target")
+
+#do one hot encoding
+traintask <- createDummyFeatures (obj = traintask,target = "target") 
+testtask <- createDummyFeatures (obj = testtask,target = "target")
+
+#create learner
+lrn <- makeLearner("classif.xgboost",predict.type = "response")
+lrn$par.vals <- list( objective="binary:logistic", eval_metric="auc", nrounds=100L, eta=0.1)
+
+#set parameter space
+params <- makeParamSet( makeDiscreteParam("booster",values = c("gbtree","gblinear")), makeIntegerParam("max_depth",lower = 3L,upper = 10L), makeNumericParam("min_child_weight",lower = 1L,upper = 10L), makeNumericParam("subsample",lower = 0.5,upper = 1), makeNumericParam("colsample_bytree",lower = 0.5,upper = 1))
+
+#set resampling strategy
+rdesc <- makeResampleDesc("CV",stratify = T,iters=5L)
+
+#search strategy
+ctrl <- makeTuneControlRandom(maxit = 10L)
+```
+
+```{r}
+# Take start time to measure time of random search algorithm
+start.time <- Sys.time()
+
+# Create empty lists
+lowest_error_list = list()
+parameters_list = list()
+
+# Create 10,000 rows with random hyperparameters
+set.seed(20)
+for (iter in 1:1000){
+  param <- list(booster = "gbtree",
+                objective = "binary:logistic",
+                max_depth = sample(3:10, 1),
+                eta = runif(1, .01, .05, .3),
+                subsample = runif(1, .7, 1),
+                colsample_bytree = runif(1, .6, 1),
+                min_child_weight = sample(0:10, 1)
+  )
+  parameters <- as.data.frame(param)
+  parameters_list[[iter]] <- parameters
+}
+
+# Create object that contains all randomly created hyperparameters
+parameters_df = do.call(rbind, parameters_list)
+
+# Use randomly created parameters to create 10,000 XGBoost-models
+for (row in 1:nrow(parameters_df)){
+  set.seed(20)
+  mdcv <- xgb.train(data=dtrain,
+                    booster = "gbtree",
+                    objective = "binary:logistic",
+                    max_depth = parameters_df$max_depth[row],
+                    eta = parameters_df$eta[row],
+                    subsample = parameters_df$subsample[row],
+                    colsample_bytree = parameters_df$colsample_bytree[row],
+                    min_child_weight = parameters_df$min_child_weight[row],
+                    nrounds= 300,
+                    eval_metric = "error",
+                    early_stopping_rounds= 30,
+                    print_every_n = 100,
+                    watchlist = list(train= dtrain, val= dtest)
+  )
+  lowest_error <- as.data.frame(1 - min(mdcv$evaluation_log$val_error))
+  lowest_error_list[[row]] <- lowest_error
+}
+
+# Create object that contains all accuracy's
+lowest_error_df = do.call(rbind, lowest_error_list)
+
+# Bind columns of accuracy values and random hyperparameter values
+randomsearch = cbind(lowest_error_df, parameters_df)
+
+# Quickly display highest accuracy
+max(randomsearch$`1 - min(mdcv$evaluation_log$val_error)`)
+
+# Stop time and calculate difference
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+
+
+```
+
+```{r}
+randomsearch <- as.data.frame(randomsearch) %>%
+  rename(val_acc = `1 - min(mdcv$evaluation_log$val_error)`) %>%
+  arrange(-val_acc)
+randomsearch
+```
+
+```{r}
+# Tuned-XGBoost model
+set.seed(20)
+params <- list(booster = "gbtree", 
+               objective = "binary:logistic",
+               max_depth = randomsearch[1,]$max_depth,
+               eta = randomsearch[1,]$eta,
+               subsample = randomsearch[1,]$subsample,
+               colsample_bytree = randomsearch[1,]$colsample_bytree,
+               min_child_weight = randomsearch[1,]$min_child_weight)
+xgb_tuned <- xgb.train(params = params,
+                       data = dtrain,
+                       nrounds =1000,
+                       print_every_n = 10,
+                       eval_metric = "auc",
+                       eval_metric = "error",
+                       early_stopping_rounds = 30,
+                       watchlist = list(train= dtrain, val= dtest))
+                       
+# Make prediction on dvalid
+xgbpred <- predict (xgb_tuned,dtest)
+xgbpred <- ifelse (xgbpred > 0.5,1,0)
+
+# Check accuracy with the confusion matrix
+confusionMatrix (as.factor(xgbpred), dfImputation_test[['target']])
+
+
+rocxgboost(xgb_tuned, dfImputation_test, "target", "XGBoost - Tuned")
+
+# dtest2 <- xgb.DMatrix(data = as.matrix(dfImputation_test[ ,-which(names(dfImputation_test) %in% c("target"))]),
+#                               label=as.matrix(dfImputation_test[['target']]))
+#    dlabel2 <- as.matrix(dfImputation_test[['target']])
+# 
+#    Predict_ROC <- predict (xgb_tuned,dtest2)
+
+
+```
+
+
+
+# Model Validation
+
+```{r}
+# Function - predict & compute confusion matrix
+cm <- function(model, train, test, targetCol){
+   
+   # cm - train set
+   pred_train <- predict(model, newdata=train[ ,-which(names(train) %in% c(targetCol))])
+   cm_training = table(train[[targetCol]], pred_train)
+   print(cm_training)
+   
+   print(ggplot(data = as.data.frame(cm_training),
+       mapping = aes(x = pred_train, y = Var1)) + ggtitle("Prediction on Train Set") +
+   #geom_tile(aes(fill = Freq)) +
+   geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 0.5, size = 13) + theme_grey(base_size = 15)+
+   labs(x = "Prediction", y = "Actual") + scale_y_discrete(limits = rev(levels(train[[targetCol]]))))
+   
+   # accuracy - train set
+   accuracy_training <- round(sum(diag(cm_training))/sum(cm_training),4)
+   print(paste("Accuracy for training set: ", accuracy_training))
+   
+   # cm - test set
+   pred_test <- predict(model, newdata=test[ ,-which(names(test) %in% c(targetCol))])
+   cm_testing = table(test[[targetCol]], pred_test)
+   print(cm_testing)
+   
+   print(ggplot(data = as.data.frame(cm_testing),
+       mapping = aes(x = pred_test, y = Var1)) + ggtitle("Prediction on Test Set") +
+   #geom_tile(aes(fill = Freq)) +
+   geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 0.5, size = 13) + theme_grey(base_size = 15)+
+   labs(x = "Prediction", y = "Actual") + scale_y_discrete(limits = rev(levels(test[[targetCol]]))))
+   
+   # accuracy - test set
+   accuracy_testing <- round(sum(diag(cm_testing))/sum(cm_testing),4)
+   print(paste("Accuracy for testing set: ", accuracy_testing))
+}
+
+```
+
+```{r}
+# Function - plot ROC & calculate AUC
+roc <- function(model, test, targetCol, title){
+   Predict_ROC = predict(model, test[ ,-which(names(test) %in% c(targetCol))], type = "prob")
+   #print((Predict_ROC))
+   #print(Predict_ROC[,2])
+        
+   pred = prediction(Predict_ROC[,2], test[[targetCol]])
+   perf = performance(pred, "tpr", "fpr")
+   #plot(perf, colorize = T)
+   plot(perf,
+        main = sprintf("ROC curve - %s",title),
+        ylab = "Sensitivity",
+        xlab = "1-Specificity")
+   abline(a=0, b= 1, lty=2)
+        
+   # Area Under Curve
+   auc = as.numeric(performance(pred, "auc")@y.values)
+   auc = round(auc, 4)
+   print(paste("AUC: ", auc))
+}
+
+roc_svm <- function(model, test, targetCol, title){
+   Predict_ROC = predict(model, test[ ,-which(names(test) %in% c(targetCol))], probability = TRUE)
+   Predict_ROC = attr(Predict_ROC, "probabilities")[,'1']
+        
+   pred = prediction(Predict_ROC, test[[targetCol]])
+   perf = performance(pred, "tpr", "fpr")
+   #plot(perf, colorize = T)
+   plot(perf,
+        main = sprintf("ROC curve - %s",title),
+        ylab = "Sensitivity",
+        xlab = "1-Specificity")
+   abline(a=0, b= 1, lty=2)
+        
+   # Area Under Curve
+   auc = as.numeric(performance(pred, "auc")@y.values)
+   auc = round(auc, 4)
+   print(paste("AUC: ", auc))
+}
+
+# Function - plot all ROC
+multiROC <- function(){
+   
+}
+
+```
+
+## 2. Random Forest
+
+```{r}
+cm(newrfA1, dfImputation_train, dfImputation_test, "target")
+roc(newrfA1, dfImputation_test, "target", "RF Model A1")
+```
+
+```{r}
+cm(newrfA2, dfImputation_trainbal, dfImputation_test, "target")
+roc(newrfA2, dfImputation_test, "target", "RF Model A2")
+```
+
+```{r}
+cm(newrfB1, df_mice_train, df_mice_test, "target")
+roc(newrfB1, df_mice_test, "target", "RF Model B1")
+```
+
+```{r}
+cm(newrfB2, df_mice_trainbal, df_mice_test, "target")
+roc(newrfB2, df_mice_test, "target", "RF Model B2")
+```
+
+```{r}
+cm(newrfC1, df_mF_train, df_mF_test, "target")
+roc(newrfC1, df_mF_test, "target", "RF Model C1")
+```
+
+
+```{r}
+cm(newrfC2, df_mF_trainbal, df_mF_test, "target")
+roc(newrfC2, df_mF_test, "target", "RF Model C2")
+```
+
+# Save & Load Model
+```{r}
+# save the model to disk
+#saveRDS(newrfA1, "newrfA1.rds")
+#saveRDS(newrfA2, "newrfA2.rds")
+#saveRDS(newrfB1, "newrfB1.rds")
+#saveRDS(newrfB2, "newrfB2.rds")
+#saveRDS(newrfC1, "newrfC1.rds")
+#saveRDS(newrfC2, "newrfC2.rds")
+ 
+# later...
+ 
+# load the model
+newrfA1 <- readRDS("newrfA1.rds")
+newrfA2 <- readRDS("newrfA2.rds")
+newrfB1 <- readRDS("newrfB1.rds")
+newrfB2 <- readRDS("newrfB2.rds")
+newrfC1 <- readRDS("newrfC1.rds")
+newrfC2 <- readRDS("newrfC2.rds")
+```
+
+```{r fig.width=10, fig.height=6}
+varImpPlot(newrfC2, main = "Variable Importance")
+```
+
+
+## Model Analysing
+
+```{r}
+set.seed(123)
+lrC2 <- readRDS("lrC2.rds")
+newrfC1 <- readRDS("newrfC1.rds")
+xgb_tunedC1 <- readRDS("xgb_tunedC1.rds")
+
+
+# LRC2 ====================================
+Predict_ROC_lrC2 = predict(lrC2, df_mF_test[ ,-which(names(df_mF_test) %in% c("target"))], type = "response")
+pred_lrC2 = ROCR::prediction(Predict_ROC_lrC2, df_mF_test[["target"]])
+perf_lrC2 = ROCR::performance(pred_lrC2, "tpr", "fpr")
+
+# Area Under Curve
+auc_lrC2 = as.numeric(ROCR::performance(pred_lrC2, "auc")@y.values)
+auc_lrC2 = round(auc_lrC2, 4)
+print(paste("AUC LRC2: ", auc_lrC2))
+label_lrC2 = sprintf("LR C2: %s",auc_lrC2)
+
+# RFC1 =====================================
+Predict_ROC_rfC1 = predict(newrfC1, df_mF_test[ ,-which(names(df_mF_test) %in% c("target"))], type = "prob")
+pred_rfC1 = ROCR::prediction(Predict_ROC_rfC1[,2], df_mF_test[["target"]])
+perf_rfC1 = ROCR::performance(pred_rfC1, "tpr", "fpr")
+
+# Area Under Curve
+auc_rfC1 = as.numeric(ROCR::performance(pred_rfC1, "auc")@y.values)
+auc_rfC1 = round(auc_rfC1, 4)
+print(paste("AUC RFC1: ", auc_rfC1))
+label_rfC1 = sprintf("RF C1: %s",auc_rfC1)
+
+# XGBC1 ====================================
+dtrain <- xgb.DMatrix(data = as.matrix(df_mF_train[ ,-which(names(df_mF_train) %in% c("target"))]),
+                     label=as.matrix(df_mF_train[['target']]))
+dtest <- xgb.DMatrix(data = as.matrix(df_mF_test[ ,-which(names(df_mF_test) %in% c("target"))]),
+                     label=as.matrix(df_mF_test[['target']]))
+dlabel <- as.matrix(df_mF_test[['target']])
+Predict_ROC_xgbC1 <- predict (xgb_tunedC1,dtest)
+pred_xgbC1 = prediction(Predict_ROC_xgbC1, df_mF_test[['target']])
+perf_xgbC1 = ROCR::performance(pred_xgbC1, "tpr", "fpr")
+
+# Area Under Curve
+auc_xgbC1 = as.numeric(ROCR::performance(pred_xgbC1, "auc")@y.values)
+auc_xgbC1 = round(auc_xgbC1, 4)
+print(paste("AUC XGBoost C1: ", auc_xgbC1))
+label_xgbC1 = sprintf("XGBoost C1: %s",auc_xgbC1)
+
+# Plot ======================================
+plot(perf_lrC2, col=1, ylab="Sensitivity", xlab="1-Specificity", main="ROC Curve")
+text(locator(), labels=label_lrC2, col=1, cex = 1.5)
+plot(perf_rfC1, add = TRUE, col=2)
+text(locator(), labels=label_rfC1, col=2, cex = 1.5)
+plot(perf_xgbC1, add = TRUE, col=3)
+text(locator(), labels=label_xgbC1, col=3, cex = 1.5)
+# text(locator(), labels = c(label_lrC2, label_rfC1, label_xgbC1))
+abline(a=0, b= 1, lty=2)
+
+
+plot(lrC2)
+varImpPlot(newrfC1)
+xgb.plot.importance(xgb.importance(colnames(dtrain),model=xgb_tunedC1),cex=1,left_margin = 20)
+
+# install.packages('effects')
+library(effects)
+plot(allEffects(lrC2)[2])
+plot(lrC2$coefficients)
+
+
+# install.packages('sjPlot')
+library(sjPlot)
+plot_model(lrC2,show.values = TRUE, value.offset = .3, sort.est = TRUE, transform=NULL)
+summary(lrC2)  
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
